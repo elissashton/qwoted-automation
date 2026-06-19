@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 
-const SLACK_WEBHOOK = 'https://hooks.slack.com/services/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';
+const SLACK_WEBHOOK = process.env.SLACK_WEBHOOK;
 const SPREADSHEET_ID = '1h9ufUOVwhsCaOWQlM_pYBqTp5T65qRa7p3VLj7g89Lg';
 const SEEN_FILE = path.join(__dirname, 'seen.json');
 
