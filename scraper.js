@@ -18,13 +18,13 @@ function saveSeen(seen) {
   fs.writeFileSync(SEEN_FILE, JSON.stringify(seen, null, 2));
 }
 
+function hasSeen(seen, accountEmail, id) {
+  return seen[accountEmail]?.includes(id) || false;
+}
+
 function markSeen(seen, accountEmail, id) {
   if (!seen[accountEmail]) seen[accountEmail] = [];
   if (!seen[accountEmail].includes(id)) seen[accountEmail].push(id);
-}
-
-function hasSeen(seen, accountEmail, id) {
-  return seen[accountEmail]?.includes(id) || false;
 }
 
 async function sendSlack(blocks) {
@@ -36,38 +36,50 @@ async function sendSlack(blocks) {
   if (!res.ok) console.error('Slack error:', res.status);
 }
 
-async function sendReplyNotification(account, publication, requestTitle, replyFrom, replyText, requestUrl) {
+async function sendPitchNotification({ account, requestTitle, requestUrl, pitcherName, pitcherRole, pitchText, timestamp }) {
   await sendSlack([
     { type: 'header', text: { type: 'plain_text', text: 'New pitch reply', emoji: true } },
-    { type: 'context', elements: [{ type: 'mrkdwn', text: `*${publication}* · ${account.name}` }] },
-    { type: 'section', text: { type: 'mrkdwn', text: `*<${requestUrl}|${requestTitle}>*\n*From:* ${replyFrom}\n${replyText}` } },
-    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'View Request', emoji: true }, url: requestUrl, style: 'primary' }] }
+    { type: 'context', elements: [{ type: 'mrkdwn', text: `*${account.publication}* · ${account.name}` }] },
+    { type: 'section', text: { type: 'mrkdwn', text: `*<${requestUrl}|${requestTitle}>*` } },
+    { type: 'section', fields: [
+      { type: 'mrkdwn', text: `*From:*\n${pitcherName}` },
+      { type: 'mrkdwn', text: `*Role:*\n${pitcherRole || 'N/A'}` }
+    ]},
+    { type: 'section', text: { type: 'mrkdwn', text: pitchText.substring(0, 500) + (pitchText.length > 500 ? '...' : '') } },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: timestamp || '' }] },
+    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'View Pitches', emoji: true }, url: requestUrl, style: 'primary' }] }
+  ]);
+}
+
+async function sendInboxNotification({ account, senderName, senderCompany, subject, preview, conversationUrl }) {
+  await sendSlack([
+    { type: 'header', text: { type: 'plain_text', text: 'New inbox message', emoji: true } },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: `*${account.publication}* · ${account.name}` }] },
+    { type: 'section', fields: [
+      { type: 'mrkdwn', text: `*From:*\n${senderName}` },
+      { type: 'mrkdwn', text: `*Company:*\n${senderCompany || 'N/A'}` }
+    ]},
+    { type: 'section', text: { type: 'mrkdwn', text: `*${subject}*\n${preview}` } },
+    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'View Message', emoji: true }, url: conversationUrl, style: 'primary' }] }
   ]);
 }
 
 async function getAccounts() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-  const auth = new google.auth.GoogleAuth({
-    credentials,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly']
-  });
+  const auth = new google.auth.GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'] });
   const sheets = google.sheets({ version: 'v4', auth });
   const meta = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
   const sheetNames = meta.data.sheets.map(s => s.properties.title);
   const accounts = [];
 
   for (const sheetName of sheetNames) {
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${sheetName}!A:E`
-    });
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `${sheetName}!A:E` });
     const rows = res.data.values || [];
     if (rows.length < 2) continue;
     const headers = rows[0].map(h => h.toLowerCase().trim());
     const nameIdx = headers.findIndex(h => h === 'name');
     const userIdx = headers.findIndex(h => h.includes('username'));
     const passIdx = headers.findIndex(h => h.includes('password'));
-    const notesIdx = headers.findIndex(h => h.includes('notes'));
 
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
@@ -75,8 +87,8 @@ async function getAccounts() {
       const password = row[passIdx]?.trim();
       const name = row[nameIdx]?.trim();
       if (!username || !password || !name) continue;
-      const localPart = username.split('@')[0].replace(/\+/g, '-').replace(/\./g, '-').toLowerCase();
-      accounts.push({ name, username, password, notes: row[notesIdx]?.trim() || '', publication: sheetName, slug: localPart });
+      const slug = username.split('@')[0].replace(/\+/g, '-').replace(/\./g, '-').toLowerCase();
+      accounts.push({ name, username, password, publication: sheetName, slug });
     }
   }
   return accounts;
@@ -96,104 +108,128 @@ async function login(page, username, password) {
 }
 
 async function logout(page) {
-  try {
-    await page.goto('https://app.qwoted.com/users/sign_out', { waitUntil: 'networkidle2', timeout: 15000 });
-  } catch {}
+  try { await page.goto('https://app.qwoted.com/users/sign_out', { waitUntil: 'networkidle2', timeout: 15000 }); } catch {}
 }
 
 async function scrapeInbox(page, account, seen) {
-  const newReplies = [];
+  const newMessages = [];
   try {
     await page.goto('https://app.qwoted.com/my_inbox_v2', { waitUntil: 'networkidle2', timeout: 30000 });
     await new Promise(r => setTimeout(r, 2000));
 
     const messages = await page.evaluate(() => {
       const items = [];
-      document.querySelectorAll('[class*="inbox"], [class*="message"], [class*="pitch"]').forEach(card => {
-        const link = card.querySelector('a[href*="/source_requests/"], a[href*="/pitches/"]');
-        const text = card.innerText?.trim();
-        const href = link?.href || '';
-        const id = href.split('/').pop();
-        if (id && text && text.length > 10) items.push({ id, href, text: text.substring(0, 500) });
+      // Each conversation is a div with role="button" and data-conversation-id
+      document.querySelectorAll('[role="button"][data-conversation-id]').forEach(el => {
+        const conversationId = el.dataset.conversationId;
+        if (!conversationId) return;
+
+        const inner = el.querySelector('.d-flex.flex-column');
+        if (!inner) return;
+
+        // Sender name — first bold/strong or first line
+        const nameEl = inner.querySelector('span, strong, b, [class*="fw-"]');
+        const senderName = nameEl?.innerText?.trim() || '';
+
+        // Company — second line often
+        const lines = inner.querySelectorAll('div, p, span');
+        let senderCompany = '';
+        lines.forEach(l => {
+          const t = l.innerText?.trim();
+          if (t && t !== senderName && t.length > 2 && t.length < 60 && !t.includes('Re:') && !senderCompany) {
+            senderCompany = t;
+          }
+        });
+
+        // Subject and preview
+        const allText = inner.innerText?.trim() || '';
+        const textLines = allText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        const subject = textLines.find(l => l.startsWith('Re:') || l.startsWith('re:')) || textLines[1] || '';
+        const preview = textLines[textLines.length - 1] || '';
+
+        items.push({ conversationId, senderName, senderCompany, subject, preview });
       });
       return items;
     });
 
+    console.log(account.name + ' inbox: ' + messages.length + ' conversations');
+
     for (const msg of messages) {
-      if (!msg.id || hasSeen(seen, account.username, 'inbox-' + msg.id)) continue;
-      markSeen(seen, account.username, 'inbox-' + msg.id);
-      newReplies.push({ type: 'inbox', ...msg });
+      const seenKey = 'inbox-' + msg.conversationId;
+      if (hasSeen(seen, account.username, seenKey)) continue;
+      markSeen(seen, account.username, seenKey);
+
+      newMessages.push(msg);
     }
   } catch (err) {
     console.error('Inbox scrape failed for ' + account.username + ': ' + err.message);
   }
-  return newReplies;
+  return newMessages;
 }
 
-async function scrapeReporterRequests(page, account, seen) {
-  const newReplies = [];
-  const url = 'https://app.qwoted.com/users/' + account.slug + '/reporter_requests';
+async function getOpenRequests(page, slug) {
+  const url = 'https://app.qwoted.com/users/' + slug + '/reporter_requests';
+  await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+  await new Promise(r => setTimeout(r, 2000));
 
-  try {
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-    await new Promise(r => setTimeout(r, 2000));
+  return await page.evaluate(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const requests = [];
+    const seen = new Set();
 
-    const requests = await page.evaluate(() => {
-      const items = [];
-      const today = new Date();
-      const seen = new Set();
-      document.querySelectorAll('a[href*="/source_requests/"]').forEach(a => {
-        const href = a.href;
-        const id = href.split('/').filter(Boolean).pop();
-        if (!id || seen.has(id)) return;
-        seen.add(id);
-        const card = a.closest('li, article, [class*="card"], [class*="request"]') || a.parentElement;
-        const text = card?.innerText || a.innerText || '';
-        const deadlineMatch = text.match(/(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/);
-        let deadlinePassed = false;
-        if (deadlineMatch) {
-          const d = new Date(deadlineMatch[0]);
-          if (!isNaN(d) && d < today) deadlinePassed = true;
-        }
-        if (!deadlinePassed) items.push({ href, id, title: text.substring(0, 200) });
-      });
-      return items;
+    document.querySelectorAll('table.table-hover tbody tr.align-middle').forEach(row => {
+      const link = row.querySelector('td:first-child a');
+      if (!link) return;
+      const href = link.href;
+      const id = href.split('/').filter(Boolean).pop();
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+
+      const deadlineCell = row.querySelector('td.d-none.d-sm-table-cell');
+      const deadlineText = deadlineCell?.innerText?.trim();
+      let deadlinePassed = false;
+      if (deadlineText) {
+        const d = new Date(deadlineText);
+        if (!isNaN(d) && d < today) deadlinePassed = true;
+      }
+
+      const progressText = row.innerText || '';
+      if (progressText.toLowerCase().includes('complete')) deadlinePassed = true;
+
+      if (!deadlinePassed) requests.push({ href, id, title: link.innerText.trim() });
     });
 
-    console.log(account.name + ': ' + requests.length + ' open requests');
+    return requests;
+  });
+}
 
-    for (const req of requests.slice(0, 20)) {
-      try {
-        await page.goto(req.href, { waitUntil: 'networkidle2', timeout: 20000 });
-        await new Promise(r => setTimeout(r, 1500));
+async function getPitchReplies(page, request) {
+  await page.goto(request.href, { waitUntil: 'networkidle2', timeout: 30000 });
+  await new Promise(r => setTimeout(r, 2000));
 
-        const replies = await page.evaluate(() => {
-          const items = [];
-          document.querySelectorAll('[class*="reply"], [class*="pitch-response"], [class*="response"], [class*="pitch_reply"]').forEach(el => {
-            const id = el.id || el.dataset?.id;
-            const author = el.querySelector('[class*="author"], [class*="name"], h4, h5')?.innerText?.trim();
-            const text = el.innerText?.trim()?.substring(0, 600);
-            if (text && text.length > 20) items.push({ id: id || text.substring(0, 40), author: author || 'Unknown', text });
-          });
-          return items;
-        });
+  return await page.evaluate(() => {
+    const pitches = [];
+    document.querySelectorAll('[id^="pitch-"][id$="-simple-format-and-truncate"]').forEach(el => {
+      const match = el.id.match(/pitch-(\d+)-/);
+      if (!match) return;
+      const pitchId = match[1];
 
-        for (const reply of replies) {
-          const replyId = 'reply-' + req.id + '-' + reply.id;
-          if (hasSeen(seen, account.username, replyId)) continue;
-          markSeen(seen, account.username, replyId);
-          const title = await page.evaluate(() => document.querySelector('h2.fw-bold')?.innerText?.trim() || document.title);
-          const publication = await page.evaluate(() => document.querySelector('a[href^="/publications/"]')?.innerText?.trim() || '');
-          newReplies.push({ type: 'pitch_reply', requestUrl: req.href, requestTitle: title, publication: publication || account.publication, replyFrom: reply.author, replyText: reply.text });
-        }
-      } catch (err) {
-        console.error('Failed to check request ' + req.href + ': ' + err.message);
-      }
-    }
-  } catch (err) {
-    console.error('Reporter requests failed for ' + account.username + ': ' + err.message);
-  }
-  return newReplies;
+      const card = el.closest('.d-flex.flex-row') || el.parentElement?.parentElement;
+      const nameEl = card?.querySelector('a[href*="/users/"]');
+      const pitcherName = nameEl?.innerText?.trim() || 'Unknown';
+      const roleEl = nameEl?.closest('div')?.nextElementSibling;
+      const pitcherRole = roleEl?.innerText?.trim() || '';
+      const timeEl = card?.querySelector('[class*="text-end"], .text-end');
+      const timestamp = timeEl?.innerText?.trim() || '';
+
+      const textEls = el.querySelectorAll('p');
+      const pitchText = Array.from(textEls).map(p => p.innerText.trim()).filter(t => t.length > 0).join('\n');
+
+      if (pitchId && pitchText) pitches.push({ pitchId, pitcherName, pitcherRole, pitchText, timestamp });
+    });
+    return pitches;
+  });
 }
 
 async function main() {
@@ -208,7 +244,7 @@ async function main() {
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
   });
 
-  let totalNewReplies = 0;
+  let totalNew = 0;
 
   for (const account of accounts) {
     console.log('\nProcessing: ' + account.name + ' (' + account.publication + ')');
@@ -218,21 +254,51 @@ async function main() {
 
     try {
       await login(page, account.username, account.password);
-      const inboxReplies = await scrapeInbox(page, account, seen);
-      const pitchReplies = await scrapeReporterRequests(page, account, seen);
-      const allReplies = [...inboxReplies, ...pitchReplies];
-      totalNewReplies += allReplies.length;
 
-      for (const reply of allReplies) {
-        await sendReplyNotification(
+      // Check inbox
+      const inboxMessages = await scrapeInbox(page, account, seen);
+      for (const msg of inboxMessages) {
+        await sendInboxNotification({
           account,
-          reply.publication || account.publication,
-          reply.requestTitle || 'Inbox message',
-          reply.replyFrom || account.name,
-          reply.replyText || reply.text || '',
-          reply.requestUrl || reply.href || 'https://app.qwoted.com/my_inbox_v2'
-        );
-        console.log('New reply found for ' + account.name);
+          senderName: msg.senderName,
+          senderCompany: msg.senderCompany,
+          subject: msg.subject,
+          preview: msg.preview,
+          conversationUrl: 'https://app.qwoted.com/my_inbox_v2?conversation=' + msg.conversationId
+        });
+        totalNew++;
+        console.log('  New inbox message from ' + msg.senderName);
+      }
+
+      // Check pitch replies on open requests
+      const requests = await getOpenRequests(page, account.slug);
+      console.log(account.name + ': ' + requests.length + ' open requests');
+
+      for (const request of requests) {
+        try {
+          const pitches = await getPitchReplies(page, request);
+          console.log('  ' + request.title + ': ' + pitches.length + ' pitches');
+
+          for (const pitch of pitches) {
+            const seenKey = 'pitch-' + pitch.pitchId;
+            if (hasSeen(seen, account.username, seenKey)) continue;
+            markSeen(seen, account.username, seenKey);
+
+            await sendPitchNotification({
+              account,
+              requestTitle: request.title,
+              requestUrl: request.href,
+              pitcherName: pitch.pitcherName,
+              pitcherRole: pitch.pitcherRole,
+              pitchText: pitch.pitchText,
+              timestamp: pitch.timestamp
+            });
+            totalNew++;
+            console.log('  New pitch from ' + pitch.pitcherName);
+          }
+        } catch (err) {
+          console.error('  Failed to check ' + request.title + ': ' + err.message);
+        }
       }
 
       await logout(page);
@@ -246,14 +312,14 @@ async function main() {
   await browser.close();
   saveSeen(seen);
 
-  if (totalNewReplies === 0) {
+  if (totalNew === 0) {
     await sendSlack([{
       type: 'section',
-      text: { type: 'mrkdwn', text: '✅ *All clear* — checked ' + accounts.length + ' accounts. No new pitch replies.' }
+      text: { type: 'mrkdwn', text: '✅ *All clear* — checked ' + accounts.length + ' accounts. No new pitch replies or inbox messages.' }
     }]);
   }
 
-  console.log('\nDone. ' + totalNewReplies + ' new replies found.');
+  console.log('\nDone. ' + totalNew + ' new items found.');
 }
 
 main().catch(err => {
