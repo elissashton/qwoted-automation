@@ -1,0 +1,13 @@
+{
+  "name": "qwoted-automation",
+  "version": "1.0.0",
+  "description": "Automated Qwoted pitch reply checker",
+  "main": "scraper.js",
+  "scripts": {
+    "start": "node scraper.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^21.0.0",
+    "googleapis": "^140.0.0"
+  }
+}
