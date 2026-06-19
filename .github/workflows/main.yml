@@ -3,7 +3,7 @@ name: Qwoted Reply Checker
 on:
   schedule:
     # Every 15 mins, weekdays, 8am-6pm UK (BST = UTC+1, so 7am-5pm UTC)
-    - cron: '*/15 7-17 * * 1-5'
+ - cron: '* * * * *'
   workflow_dispatch:
 
 jobs:
