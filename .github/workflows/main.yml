@@ -1,0 +1,49 @@
+name: Qwoted Reply Checker
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check-replies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install Chrome
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list'
+          sudo apt-get update && sudo apt-get install -y google-chrome-stable
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Restore seen.json cache
+        uses: actions/cache@v4
+        with:
+          path: seen.json
+          key: seen-json-${{ github.run_id }}
+          restore-keys: |
+            seen-json-
+
+      - name: Run scraper
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: node scraper.js
+
+      - name: Save seen.json cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: seen.json
+          key: seen-json-${{ github.run_id }}
