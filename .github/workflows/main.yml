@@ -2,7 +2,7 @@ name: Qwoted Reply Checker
 
 on:
   schedule:
-    - cron: '* * * * *'
+    - cron: '*/15 7-17 * * 1-5'
   workflow_dispatch:
 
 jobs:
