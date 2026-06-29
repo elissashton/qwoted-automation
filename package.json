@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "puppeteer-core": "^21.0.0",
-    "googleapis": "^140.0.0"
+    "googleapis": "^105.0.0",
+    "node-fetch": "^2.6.9"
   }
 }
